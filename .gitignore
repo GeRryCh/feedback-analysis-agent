@@ -31,5 +31,8 @@ Thumbs.db
 # Data files
 feedback.csv
 
+# Log files
+*.log
+
 # AI code
 .claude/*
