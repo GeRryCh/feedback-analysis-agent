@@ -1,16 +1,16 @@
 import streamlit as st
 import pandas as pd
 import os
-import random
-from typing import Annotated
+from typing import Annotated, Optional, Dict
 from typing_extensions import TypedDict
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field
 
 from langchain_openai import ChatOpenAI
 from langchain_experimental.agents import create_pandas_dataframe_agent
 from langchain_core.messages import AnyMessage, HumanMessage, AIMessage
-from langchain_core.tools import Tool, tool
-from langgraph.graph import StateGraph, START
+from langchain_core.tools import tool
+from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.memory import MemorySaver
@@ -40,22 +40,15 @@ class AgentState(TypedDict):
 # ============================================================================
 
 @st.cache_data
-def load_data(file_path="feedback.csv"):
+def load_data(file_path="feedback.csv") -> pd.DataFrame | None:
     """
     Load feedback data from CSV file into a Pandas DataFrame.
-
-    Args:
-        file_path (str): Path to the CSV file
-
-    Returns:
-        pd.DataFrame: Loaded DataFrame or None if error occurs
     """
     try:
         df = pd.read_csv(file_path)
         return df
     except FileNotFoundError:
         st.error(f"❌ Error: '{file_path}' not found in the project directory.")
-        st.info("Please ensure your feedback.csv file is in the root directory of this project.")
         return None
     except Exception as e:
         st.error(f"❌ Error loading data: {str(e)}")
@@ -63,183 +56,233 @@ def load_data(file_path="feedback.csv"):
 
 
 # ============================================================================
-# TOOL 1: PANDAS DATA ANALYZER
+# STRUCTURED OUTPUT MODELS
 # ============================================================================
 
-def create_pandas_analyzer_tool(df, api_key):
-    """
-    Create a tool that wraps the pandas dataframe agent.
-
-    Args:
-        df (pd.DataFrame): DataFrame to analyze
-        api_key (str): OpenAI API key
-
-    Returns:
-        Tool: LangChain Tool wrapping the pandas agent
-    """
-    llm = ChatOpenAI(
-        model="gpt-4o",
-        temperature=0,
-        openai_api_key=api_key
+class QueryClassification(BaseModel):
+    """Structured output for query classification"""
+    pandas_analysis: Optional[str] = Field(
+        None,
+        description="The quantitative/filtering part of the query for pandas analysis (e.g., 'filter Level < 3', 'count by ServiceName')"
+    )
+    semantic_analysis: Optional[str] = Field(
+        None,
+        description="The semantic/qualitative part of the query for topic analysis (e.g., 'main topics', 'sentiment themes')"
     )
 
-    # Create the pandas dataframe agent
+
+# ============================================================================
+# ANALYSIS METHODS
+# ============================================================================
+
+def pandas_analysis(df: pd.DataFrame, query: str) -> pd.DataFrame:
+    """
+    Perform pandas data analysis and filtering.
+    Returns the filtered DataFrame after applying create_pandas_dataframe_agent.
+    """
+    api_key = os.getenv("OPENAI_API_KEY")
+    llm = ChatOpenAI(model="gpt-4o", temperature=0, openai_api_key=api_key)
+    
+    # Create a custom prompt that instructs the agent to return the DataFrame
+    custom_prompt = f"""
+    {query}
+    
+    IMPORTANT: After completing the analysis/filtering, you must return the resulting DataFrame object itself.
+    If you filtered the data, return the filtered DataFrame.
+    If you performed analysis without filtering, return the original DataFrame.
+    Your final answer should be the DataFrame object, not a description of it.
+    """
+    
     pandas_agent_executor = create_pandas_dataframe_agent(
         llm,
         df,
         agent_type="tool-calling",
         verbose=True,
-        allow_dangerous_code=True
+        allow_dangerous_code=True,
+        return_intermediate_steps=True
     )
-
-    def analyze_data(query: str) -> str:
-        """Execute pandas agent for data analysis."""
-        try:
-            result = pandas_agent_executor.invoke({"input": query})
-            if isinstance(result, dict) and 'output' in result:
-                return result['output']
-            return str(result)
-        except Exception as e:
-            return f"Error analyzing data: {str(e)}"
-
-    return Tool(
-        name="analyze_data",
-        func=analyze_data,
-        description=(
-            "Use this tool for all statistical analysis, data queries, counting records, "
-            "filtering data, calculating averages, analyzing distributions, finding patterns "
-            "in structured data, and any questions about the feedback dataset's numbers or statistics. "
-            "This tool has access to the complete feedback DataFrame with columns: "
-            "ID, ServiceName, Level, Text, ReferenceNumber, RequestID, ProcessID, CreationDate."
-        )
-    )
+    
+    try:
+        result = pandas_agent_executor.invoke({"input": custom_prompt})
+        
+        # Try to extract the DataFrame from intermediate steps
+        if "intermediate_steps" in result:
+            for step in result["intermediate_steps"]:
+                if len(step) > 1 and isinstance(step[1], pd.DataFrame):
+                    return step[1]
+        
+        # If no DataFrame found in intermediate steps, return original
+        return df
+        
+    except Exception as e:
+        # Return original DataFrame on error (no Streamlit UI calls in tool)
+        return df
 
 
-# ============================================================================
-# TOOL 2: SEMANTIC TOPIC EXTRACTION
-# ============================================================================
-
-def create_semantic_topics_tool(feedback_texts: list[str]):
+def semantic_analysis(df: pd.DataFrame, query: str) -> str:
     """
-    Create a tool that analyzes semantic topics from pre-loaded feedback texts.
+    Analyzes the 'Text' column of the DataFrame to find semantic topics.
+    Filters to first 300 rows for efficiency.
+    """
+    if 'Text' not in df.columns:
+        return "Error: 'Text' column not found in DataFrame."
+    
+    if len(df) == 0:
+        return "The DataFrame is empty. Nothing to analyze."
+    
+    SAMPLE_SIZE = 300
+    sample_df = df.head(SAMPLE_SIZE)  # Use first 300 rows instead of random sample
+    sample_texts = sample_df['Text'].dropna().tolist()
+    
+    if not sample_texts:
+        return "No feedback text found in the data to analyze."
+    
+    prompt_template = f"""
+    Based on the user's query: "{query}", analyze the following {len(sample_texts)} feedback comments.
+    Identify the 3-5 most common topics relevant to the query. For each topic,
+    provide a short title and a 1-sentence description.
+
+    Feedback to analyze:
+    ---
+    {sample_texts}
+    ---
+    """
+    
+    try:
+        api_key = os.getenv("OPENAI_API_KEY")
+        llm = ChatOpenAI(model="gpt-4o", temperature=0, openai_api_key=api_key)
+        response = llm.invoke([HumanMessage(content=prompt_template)])
+        return response.content
+    except Exception as e:
+        return f"Error during topic analysis: {str(e)}"
+
+
+def classify(query: str) -> Dict[str, Optional[str]]:
+    """
+    Classify and split the user query into quantitative and semantic parts.
+    Returns a structured dictionary with keys for each analysis method.
+    """
+    api_key = os.getenv("OPENAI_API_KEY")
+    llm = ChatOpenAI(model="gpt-4o", temperature=0, openai_api_key=api_key)
+    
+    # Create a structured LLM with the QueryClassification model
+    structured_llm = llm.with_structured_output(QueryClassification)
+    
+    system_prompt = """
+    You are a query classifier for a feedback analysis system.
+    The feedback dataset has the following columns:
+    - ID: Unique identifier
+    - ServiceName: Name of the service
+    - Level: Feedback level/rating (numeric)
+    - Text: Feedback text content
+    - ReferenceNumber: Reference number for tracking
+    
+    Your task is to split user queries into two parts:
+    1. pandas_analysis: For quantitative operations like filtering, counting, grouping, statistical analysis
+    2. semantic_analysis: For qualitative analysis of the Text field like finding topics, themes, sentiment
+    
+    Examples:
+    - "What are the 5 main topics of feedbacks with level < 3?"
+      pandas_analysis: "filter where Level < 3"
+      semantic_analysis: "find 5 main topics"
+    
+    - "How many feedbacks per ServiceName?"
+      pandas_analysis: "count feedbacks grouped by ServiceName"
+      semantic_analysis: None
+    
+    - "What are people complaining about?"
+      pandas_analysis: None
+      semantic_analysis: "identify complaint topics"
+    
+    If a part doesn't apply, return None for that field.
+    """
+    
+    try:
+        result = structured_llm.invoke([
+            HumanMessage(content=f"System: {system_prompt}\n\nUser query: {query}")
+        ])
+        
+        return {
+            "pandas_analysis": result.pandas_analysis,
+            "semantic_analysis": result.semantic_analysis
+        }
+    except Exception as e:
+        # Return None for both on error (no Streamlit UI calls in tool)
+        return {"pandas_analysis": None, "semantic_analysis": None}
+
+
+@tool
+def process_request(user_input: str) -> str:
+    """Analyze feedback data based on user queries.
+
+    This tool can handle various types of feedback analysis including:
+    - Quantitative analysis: filtering, counting, grouping by columns (Level, ServiceName, etc.)
+    - Qualitative analysis: identifying topics, themes, and sentiment from feedback text
+    - Combined analysis: first filtering data, then analyzing the subset
+
+    Examples of queries this tool handles:
+    - "What are the 5 main topics of feedbacks with level < 3?"
+    - "How many feedbacks per ServiceName?"
+    - "What are people complaining about?"
+    - "Show negative feedback and identify main issues"
+
+    The tool automatically determines whether to use quantitative filtering,
+    semantic analysis, or both based on the query content.
 
     Args:
-        feedback_texts (list[str]): The feedback texts to analyze
+        user_input: The user's question or request about the feedback data
 
     Returns:
-        Tool: A LangChain tool for semantic topic extraction
+        A comprehensive analysis result as a formatted string
     """
-
-    @tool
-    def extract_semantic_topics() -> str:
-        """
-        Analyzes feedback texts to find high-level SEMANTIC topics and categories.
-        Use this tool *only* when the user asks for 'main topics', 'themes', or 'what people are talking about'.
-        This tool uses an AI model to understand the *meaning* of the feedback.
-
-        Returns:
-            str: A formatted string of the 5 main categories found.
-        """
-        texts = feedback_texts  # Use the feedback_texts from the closure
-
-        if not texts:
-            return "No feedback text was provided to analyze."
-
-        # --- 1. Sample the Data ---
-        # We can't send 5000+ comments. Let's take a representative sample.
-        SAMPLE_SIZE = 300
-        if len(texts) > SAMPLE_SIZE:
-            sample_texts = random.sample(texts, SAMPLE_SIZE)
-        else:
-            sample_texts = texts
-
-        # Filter out any non-string or empty data
-        sample_texts = [str(t) for t in sample_texts if isinstance(t, str) and len(t.strip()) > 10]
-
-        if len(sample_texts) < 10:
-            return f"Not enough text data to analyze (found only {len(sample_texts)} valid comments)."
-
-        # --- 2. Create the AI Analyst Prompt ---
-        # This is the most important part.
-        prompt_template = f"""
-        You are a professional data analyst. I have a list of {len(sample_texts)} user feedback comments.
-        Your job is to read all of them and identify the 5 most common, high-level topics or categories.
-
-        **Instructions:**
-        1.  **Analyze Meaning:** Do NOT just count words. Understand the *intent* and *meaning* of the comments.
-        2.  **Group Synonyms:** Group similar ideas. For example, 'cannot log in', 'forgot password', and 'sign-in issue' should all be one topic.
-        3.  **Provide Categories:** Return 5 categories.
-        4.  **Format:** For each category, provide a short, clear title (e.g., "Positive Feedback on Clarity") and a 1-sentence description of what it includes.
-        5.  **Ignore common words:** Do not list "thank you", "very", "was", etc., as topics. Focus on *actionable themes*.
-
-        Here is the feedback to analyze:
-        ---
-        {sample_texts}
-        ---
-        End of feedback.
-
-        Please provide your 5-category analysis.
-        """
-
-        # --- 3. Call the LLM to perform the analysis ---
-        try:
-            # Initialize a new LLM instance for this specific task
-            # We use gpt-4o for better reasoning on this complex task
-            api_key = os.getenv("OPENAI_API_KEY")
-            if not api_key:
-                return "Error: OPENAI_API_KEY not found for topic analysis tool."
-
-            llm = ChatOpenAI(model="gpt-4o", temperature=0, openai_api_key=api_key)
-
-            messages = [HumanMessage(content=prompt_template)]
-
-            response = llm.invoke(messages)
-
-            analysis_result = response.content
-
-            return f"Here is an AI-powered analysis of the main feedback themes:\n\n{analysis_result}"
-
-        except Exception as e:
-            return f"An error occurred while analyzing topics: {str(e)}"
-
-    return extract_semantic_topics
+    # Load data
+    df = load_data()
+    if df is None:
+        return "Error: Could not load data."
     
+    # Classify the query
+    classification = classify(user_input)
+    
+    results = []
+    filtered_df = df
+    
+    # Process pandas analysis if present
+    if classification.get("pandas_analysis"):
+        filtered_df = pandas_analysis(df, classification["pandas_analysis"])
+
+        # Generate a summary of the pandas operation
+        if isinstance(filtered_df, pd.DataFrame):
+            if len(filtered_df) != len(df):
+                results.append(f"**Data filtered:** {len(filtered_df)} records (from {len(df)} total)")
+            else:
+                results.append(f"**Data analyzed:** {len(df)} records")
+
+    # Process semantic analysis if present
+    if classification.get("semantic_analysis"):
+        semantic_result = semantic_analysis(filtered_df, classification["semantic_analysis"])
+        results.append(f"**Semantic Analysis Results:**\n{semantic_result}")
+    
+    # If no analysis was needed
+    if not classification.get("pandas_analysis") and not classification.get("semantic_analysis"):
+        results.append("I couldn't identify what type of analysis you need. Please rephrase your question.")
+    
+    return "\n\n".join(results)
+
 
 # ============================================================================
 # LANGGRAPH SETUP
 # ============================================================================
 
-def create_graph(df, api_key):
-    """
-    Create and compile the LangGraph StateGraph with tools.
+def build_graph(api_key):
+    """Create and compile the custom LangGraph StateGraph with tool-calling."""
 
-    Args:
-        df (pd.DataFrame): DataFrame for analysis
-        api_key (str): OpenAI API key
-
-    Returns:
-        Compiled LangGraph application
-    """
-    # Extract feedback texts for topic analysis
-    feedback_texts = []
-    if 'Text' in df.columns:
-        feedback_texts = df['Text'].dropna().tolist()
-    # Create tools
-    pandas_tool = create_pandas_analyzer_tool(df, api_key)
-    topics_tool = create_semantic_topics_tool(feedback_texts)  # Create tool with feedback texts pre-bound
-    tools = [pandas_tool, topics_tool]
-
-    # Create LLM with tools bound
-    llm = ChatOpenAI(
-        model="gpt-4o",
-        temperature=0,
-        openai_api_key=api_key
-    )
+    # Create LLM with bound tools
+    llm = ChatOpenAI(model="gpt-4o", temperature=0, openai_api_key=api_key)
+    tools = [process_request]
     llm_with_tools = llm.bind_tools(tools)
 
-    # Define agent node
     def agent(state: AgentState):
-        """Agent node that calls the LLM with tools."""
+        """Agent node that decides whether to call tools or respond."""
         response = llm_with_tools.invoke(state["messages"])
         return {"messages": [response]}
 
@@ -252,10 +295,12 @@ def create_graph(df, api_key):
 
     # Add edges
     graph_builder.add_edge(START, "agent")
-    graph_builder.add_conditional_edges("agent", tools_condition)
-    graph_builder.add_edge("tools", "agent")
+    graph_builder.add_conditional_edges(
+        "agent",
+        tools_condition  # Built-in helper that routes to "tools" if tool_calls exist, otherwise END
+    )
+    graph_builder.add_edge("tools", "agent")  # After tools, go back to agent
 
-    # Compile with memory
     memory = MemorySaver()
     return graph_builder.compile(checkpointer=memory)
 
@@ -265,128 +310,77 @@ def create_graph(df, api_key):
 # ============================================================================
 
 def main():
-    """Main application function."""
-
-    # Header
     st.title("📊 Feedback Analysis Agent")
-    st.markdown("""
-    Ask questions about your feedback data in natural language. This AI agent can:
-    - Analyze statistical data and run queries on your feedback
-    - Extract topics and themes from feedback text
-    """)
+    st.markdown("Ask questions about your feedback data. The agent can filter data and then run analysis on the subset.")
 
-    # Check for API key
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        st.error("❌ OpenAI API key not found!")
-        st.info("""
-        Please set your OpenAI API key:
-        1. Copy `.env.example` to `.env`
-        2. Add your API key: `OPENAI_API_KEY=your_key_here`
-        3. Restart the application
-        """)
+        st.error("❌ OpenAI API key not found! Please set it in your .env file.")
         st.stop()
 
-    # Load data
-    with st.spinner("Loading feedback data..."):
-        df = load_data()
-
-    if df is None:
+    # Load initial data
+    initial_df = load_data()
+    if initial_df is None:
         st.stop()
 
-    # Display data info
     with st.expander("📋 Dataset Overview", expanded=False):
-        st.write(f"**Total Records:** {len(df)}")
-        st.write(f"**Columns:** {', '.join(df.columns.tolist())}")
-        st.write("**First 5 rows:**")
-        st.dataframe(df.head(), width='stretch')
-        st.write("**Basic Statistics:**")
-        # Exclude ID columns from statistics (they're identifiers, not meaningful metrics)
-        id_columns = ['ID', 'ReferenceNumber', 'RequestID', 'ProcessID']
-        stats_df = df.drop(columns=[col for col in id_columns if col in df.columns], errors='ignore')
-        st.dataframe(stats_df.describe(), width='stretch')
+        st.write(f"**Total Records:** {len(initial_df)}")
+        st.dataframe(initial_df.head())
 
-    st.session_state.graph = create_graph(df, api_key)
-    if st.session_state.graph is None:
-        st.error("Failed to initialize agent.")
-        st.stop()
-
-    # Initialize chat history
+    if 'graph' not in st.session_state:
+        st.session_state.graph = build_graph(api_key)
     if 'messages' not in st.session_state:
         st.session_state.messages = []
 
     st.markdown("---")
-
-    # Example questions
-    with st.expander("💡 Example Questions"):
+    with st.expander("💡 Example Queries"):
         st.markdown("""
-        **Data Analysis Questions:**
-        - What is the average Level (rating) in the feedback?
-        - How many records have a Level of 5?
-        - What percentage of feedback has a Level >= 4?
-        - Show me the distribution of ratings
-
-        **Topic/Theme Questions:**
-        - What are the main topics mentioned in the feedback?
-        - Extract the key themes from user feedback
-        - What keywords appear most frequently?
+        **Simple Queries:**
+        - "What are the 5 main topics of feedbacks with level < 3?"
+        - "How many feedbacks per ServiceName?"
+        - "What are people complaining about?"
+        
+        **Complex Queries:**
+        - "Show me the negative feedback (Level < 3) and what are the main issues?"
+        - "Filter feedbacks for ServiceName 'Support' and identify common themes"
         """)
 
-    # Display chat history
-    for message in st.session_state.messages:
-        if isinstance(message, HumanMessage):
-            with st.chat_message("user"):
-                st.write(message.content)
-        elif isinstance(message, AIMessage):
-            with st.chat_message("assistant"):
-                st.write(message.content)
+    for msg in st.session_state.messages:
+        if isinstance(msg, HumanMessage):
+            with st.chat_message("user"): st.write(msg.content)
+        elif isinstance(msg, AIMessage) and msg.content:
+            with st.chat_message("assistant"): st.write(msg.content)
 
-    # Chat input
-    if prompt := st.chat_input("Ask a question about the feedback data..."):
-        # Add user message to chat history
-        user_message = HumanMessage(content=prompt)
-        st.session_state.messages.append(user_message)
+    if prompt := st.chat_input("Ask a question..."):
+        st.session_state.messages.append(HumanMessage(content=prompt))
+        with st.chat_message("user"): st.write(prompt)
 
-        # Display user message
-        with st.chat_message("user"):
-            st.write(prompt)
-
-        # Get agent response
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
                 try:
-                    # Invoke the graph
+                    # Process_request handles everything internally
+                    initial_state = {"messages": st.session_state.messages}
+
                     config = {"configurable": {"thread_id": "streamlit-session"}}
-                    result = st.session_state.graph.invoke(
-                        {"messages": st.session_state.messages},
-                        config=config
-                    )
+                    result = st.session_state.graph.invoke(initial_state, config=config)
 
-                    # Extract the assistant's response
                     assistant_message = result["messages"][-1]
-
-                    # Display and store the response
                     st.write(assistant_message.content)
                     st.session_state.messages.append(assistant_message)
 
                 except Exception as e:
-                    error_msg = f"❌ Error: {str(e)}\n\nPlease try rephrasing your question."
+                    error_msg = f"❌ Error: {e}\n\nPlease try rephrasing."
                     st.error(error_msg)
                     st.session_state.messages.append(AIMessage(content=error_msg))
 
-    # Clear chat button
     if st.session_state.messages:
-        if st.button("🗑️ Clear Chat History"):
+        if st.button("🗑️ Clear Chat"):
             st.session_state.messages = []
+            # Reset the conversation
             st.rerun()
 
-    # Footer
     st.markdown("---")
-    st.markdown("""
-    <div style='text-align: center; color: gray; font-size: 0.9em;'>
-        Powered by LangGraph 🦜🕸️ and OpenAI 🤖
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown("<div style='text-align: center; color: gray;'>Powered by LangGraph & OpenAI</div>", unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
