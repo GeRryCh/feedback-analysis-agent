@@ -2,6 +2,31 @@
 
 An AI-powered application that analyzes user feedback using natural language queries. Built with Streamlit, LangChain, and OpenAI.
 
+## 📖 Overview
+
+This application intelligently processes and analyzes customer feedback data through a sophisticated multi-agent architecture. The system automatically classifies incoming queries and routes them through specialized analysis pipelines:
+
+- **Query Classification**: Uses GPT-4 to categorize user questions into quantitative (filtering, counting, statistics) and semantic (topics, themes, sentiment) analysis types
+- **Quantitative Analysis**: Employs LangChain's Pandas DataFrame Agent for data manipulation, filtering, and statistical computations
+- **Semantic Analysis**: Leverages GPT-4 to identify themes, topics, and patterns in feedback text (uses first 300 rows for efficiency)
+- **Orchestrated Workflow**: Built on LangGraph's StateGraph to manage multi-step analysis chains and conversation flow
+
+The architecture enables complex queries like "What are the main complaints in feedback with ratings below 3?" by automatically splitting them into filtering operations followed by semantic analysis.
+
+## 🏛️ Architecture
+
+![Architecture Diagram](graph.png)
+
+The system is built using LangGraph's StateGraph with the following nodes:
+
+1. **Orchestrator Node**: Routes queries to either direct response or analysis pipeline
+2. **Classify Node**: Splits user queries into quantitative and semantic components using structured LLM output
+3. **Quantitative Analysis Node**: Executes pandas operations for data filtering and statistics
+4. **Semantic Analysis Node**: Analyzes text content to extract themes and topics
+5. **Format Results Node**: Combines and prioritizes results for user presentation
+
+The state management tracks messages, classifications, dataframes, and analysis results throughout the execution flow.
+
 ## 🌟 Features
 
 - **Natural Language Interface**: Ask questions about your feedback data in plain English
@@ -60,22 +85,6 @@ pip install -r requirements.txt
    OPENAI_API_KEY=your_actual_api_key_here
    ```
 
-### 5. Add Your Data
-
-Place your `feedback.csv` file in the project root directory. The CSV should contain your feedback data with columns such as:
-- Rating/Score
-- Feedback text/comments
-- Date (optional)
-- Any other relevant fields
-
-**Example CSV structure:**
-```csv
-id,rating,comment,date
-1,5,Great product!,2024-01-15
-2,2,Needs improvement,2024-01-16
-3,4,Good overall,2024-01-17
-```
-
 ## ▶️ Running the Application
 
 1. Make sure your virtual environment is activated
@@ -87,26 +96,29 @@ streamlit run app.py
 
 3. The application will open in your default web browser at `http://localhost:8501`
 
-## 💡 Usage
+## 🔍 Example Queries & Execution Logs
 
-### Asking Questions
+Below are real execution traces from the LangSmith platform showing how the agent processes complex queries:
 
-Once the app is running, you can ask questions like:
+### Query 1: Multi-step Analysis
+**Query**: "What are the 5 main topics of feedbacks with level < 3?"
 
-- "What is the average rating in the feedback?"
-- "How many reviews have a 5-star rating?"
-- "What are the main topics mentioned in feedback with scores lower than 3?"
-- "What percentage of feedback is positive (score >= 4)?"
-- "Show me the distribution of ratings"
-- "What are the most common complaints?"
+This query demonstrates the agent's ability to:
+1. Classify the query into quantitative (filtering Level < 3) and semantic (finding main topics) components
+2. Execute pandas filtering to isolate low-rating feedback
+3. Perform semantic analysis on the filtered subset
 
-### Understanding the Interface
+**View full execution trace**: [LangSmith Run #1](https://smith.langchain.com/public/13216407-472f-4a02-a4f9-3a140c584f37/r)
 
-- **Dataset Overview**: Click to expand and see your data summary, column names, and basic statistics
-- **Ask a Question**: Type your question in natural language
-- **Example Questions**: Click to see suggested queries you can ask
-- **Analyze Button**: Submit your question to get an AI-powered answer
-- **Clear Button**: Reset the input field
+### Query 2: Quantitative Analysis
+**Query**: "How many feedbacks per ServiceName?"
+
+This query shows pure quantitative analysis:
+1. Classification identifies only quantitative analysis needed
+2. Pandas agent performs groupby and count operations
+3. Results are formatted and returned
+
+**View full execution trace**: [LangSmith Run #2](https://smith.langchain.com/public/10cef314-703e-4048-9245-0e509938bf93/r)
 
 ## 🏗️ Project Structure
 
@@ -121,102 +133,23 @@ feedback-anlaysis-agent/
 └── README.md             # This file
 ```
 
-## 🔧 Troubleshooting
+## 🗺️ Roadmap (Further Development & Optimizations)
 
-### "feedback.csv not found"
-- Ensure your CSV file is named exactly `feedback.csv` (case-sensitive)
-- Place it in the same directory as `app.py`
+### Performance Optimizations
+- **SQL Database Integration**: Consider migrating from in-memory pandas DataFrames to SQL database (PostgreSQL/SQLite) for better memory performance and scalability with larger datasets
+- **Incremental Loading**: Implement lazy loading and pagination for large datasets
 
-### "OpenAI API key not found"
-- Check that `.env` file exists in the project root
-- Verify the API key is set correctly: `OPENAI_API_KEY=sk-...`
-- Restart the Streamlit application after adding the key
+### Cost & Efficiency Improvements
+- **LLM Model Routing**: Implement intelligent model routing to use simpler and cheaper models (e.g., GPT-3.5-turbo) for primitive decisions and classifications, reserving GPT-4 only for complex semantic analysis
+- **Caching Layer**: Add caching for repeated queries and classification results
 
-### Module Import Errors
-- Ensure all dependencies are installed: `pip install -r requirements.txt`
-- Verify you're using the correct Python version (3.8+)
-- Check that your virtual environment is activated
-
-### API Rate Limits or Errors
-- Verify your OpenAI account has available credits
-- Check your API key is valid at [OpenAI Platform](https://platform.openai.com/)
-- Consider switching to `gpt-3.5-turbo` in `app.py` for lower costs
-
-## 🛠️ Customization
-
-### Changing the LLM Model
-
-Edit `app.py`, line with `ChatOpenAI` initialization:
-
-```python
-llm = ChatOpenAI(
-    model="gpt-3.5-turbo",  # Change to gpt-3.5-turbo for lower cost
-    temperature=0,
-    openai_api_key=api_key
-)
-```
-
-### Adjusting Agent Behavior
-
-Modify the `create_agent()` function parameters:
-- `max_iterations`: Number of reasoning steps (default: 5)
-- `verbose`: Set to `False` to hide agent reasoning in console
-
-## 📊 Sample Questions by Use Case
-
-### Quantitative Analysis
-- "What is the average rating?"
-- "How many total feedback entries do we have?"
-- "What percentage of reviews are 4 stars or above?"
-
-### Qualitative Analysis
-- "What are common themes in negative feedback?"
-- "Summarize the main complaints"
-- "What do customers like most about the product?"
-
-### Trend Analysis
-- "How has feedback changed over time?"
-- "What's the rating distribution?"
-- "Are there any patterns in the data?"
-
-## 🔒 Security Note
-
-This application uses `allow_dangerous_code=True` to execute AI-generated pandas code. For production use:
-- Implement stricter code validation
-- Consider sandboxed execution environments
-- Review and audit all generated code
-- Use in trusted environments only
-
-## 📝 Dependencies
-
-- **streamlit**: Web interface framework
-- **pandas**: Data manipulation and analysis
-- **langchain**: Agent orchestration framework
-- **langchain-openai**: OpenAI integration for LangChain
-- **langchain-experimental**: Pandas dataframe agent
-- **python-dotenv**: Environment variable management
-- **openai**: OpenAI API client
-
-## 📄 License
-
-This project is provided as-is for educational and analytical purposes.
-
-## 🤝 Support
-
-For issues or questions:
-1. Check the Troubleshooting section above
-2. Verify all installation steps were followed correctly
-3. Ensure your CSV data is properly formatted
-
-## 🎯 Future Enhancements
-
-Potential improvements:
-- Support for multiple data sources
-- Export analysis results
-- Custom visualization generation
-- Conversation history
-- Multi-file analysis
-- Advanced NLP preprocessing
+### Feature Enhancements
+- **RAG Integration**: Extend the application with Retrieval-Augmented Generation (RAG) tools to support queries like:
+  - "Give me query examples of reviews containing technical issues"
+  - "Show me similar feedback to: [example text]"
+  - Enable semantic search across historical feedback
+- **Advanced Analytics**: Add trend analysis, sentiment scoring, and automated insight generation
+- **Multi-language Support**: Extend query classification and analysis to support multiple languages
 
 ---
 
