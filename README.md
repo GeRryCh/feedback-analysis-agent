@@ -73,17 +73,27 @@ venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 4. Configure Environment Variables
+### 4. Configure Streamlit Secrets
 
-1. Copy the example environment file:
+1. Create the Streamlit secrets directory and file:
    ```bash
-   cp .env.example .env
+   mkdir -p .streamlit
    ```
 
-2. Open `.env` in a text editor and add your OpenAI API key:
+2. Create `.streamlit/secrets.toml` and add your OpenAI API key:
+   ```bash
+   cat > .streamlit/secrets.toml << 'EOF'
+   # Streamlit Secrets Configuration
+   OPENAI_API_KEY = "sk-your-actual-api-key-here"
+
+   # Authentication (optional - disabled by default)
+   REQUIRE_AUTH = false
+   EOF
    ```
-   OPENAI_API_KEY=your_actual_api_key_here
-   ```
+
+3. Replace `sk-your-actual-api-key-here` with your actual OpenAI API key
+
+**Important**: The `.streamlit/secrets.toml` file is automatically excluded from git via `.gitignore` to keep your credentials safe.
 
 ## ▶️ Running the Application
 
@@ -124,13 +134,15 @@ This query shows pure quantitative analysis:
 
 ```
 feedback-anlaysis-agent/
-├── app.py                 # Main application file
-├── feedback.csv           # Your feedback data (you provide this)
-├── requirements.txt       # Python dependencies
-├── .env                   # Environment variables (create from .env.example)
-├── .env.example          # Environment variables template
-├── .gitignore            # Git ignore rules
-└── README.md             # This file
+├── app.py                        # Main application file
+├── feedback.csv                  # Your feedback data (you provide this)
+├── requirements.txt              # Python dependencies
+├── .streamlit/
+│   └── secrets.toml             # Configuration and secrets (you create this)
+├── .gitignore                   # Git ignore rules
+├── Dockerfile                   # Docker configuration for Cloud Run
+├── DEPLOYMENT.md                # Deployment guide for Google Cloud
+└── README.md                    # This file
 ```
 
 ## 🗺️ Roadmap (Further Development & Optimizations)

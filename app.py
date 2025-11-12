@@ -24,6 +24,63 @@ st.set_page_config(
 
 
 # ============================================================================
+# AUTHENTICATION
+# ============================================================================
+
+def check_password():
+    """Returns `True` if the user had a correct password, or if authentication is disabled.
+
+    Authentication can be disabled for local development by setting:
+    - REQUIRE_AUTH=false in .streamlit/secrets.toml
+
+    By default, authentication is DISABLED for local development.
+    For cloud deployments, set REQUIRE_AUTH=true to enable authentication.
+    """
+    # Check if authentication is required
+    # Default to False (no auth) for local development
+    require_auth = False
+
+    # Check st.secrets for REQUIRE_AUTH setting
+    if "REQUIRE_AUTH" in st.secrets:
+        require_auth = str(st.secrets["REQUIRE_AUTH"]).lower() in ("true", "1", "yes")
+
+    # If authentication is not required, allow access
+    if not require_auth:
+        return True
+
+    def password_entered():
+        """Checks whether a password entered by the user is correct."""
+        # Check if the entered username exists and password matches
+        username = st.session_state["username"]
+        password = st.session_state["password"]
+
+        if username in st.secrets.get("passwords", {}) and st.secrets["passwords"][username] == password:
+            st.session_state["password_correct"] = True
+            st.session_state["authenticated_user"] = username
+            # Clear the username and password from session state for security
+            del st.session_state["username"]
+            del st.session_state["password"]
+        else:
+            st.session_state["password_correct"] = False
+
+    # Return True if the password is validated
+    if st.session_state.get("password_correct", False):
+        return True
+
+    # Show inputs for username and password
+    st.title("🔒 Authentication Required")
+    st.markdown("Please log in to access the Feedback Analysis Agent.")
+
+    st.text_input("Username", key="username", on_change=password_entered)
+    st.text_input("Password", type="password", key="password", on_change=password_entered)
+
+    if "password_correct" in st.session_state and not st.session_state["password_correct"]:
+        st.error("😕 Username or password incorrect")
+
+    return False
+
+
+# ============================================================================
 # STATE DEFINITION
 # ============================================================================
 
@@ -462,9 +519,10 @@ def main():
     st.title("📊 Feedback Analysis Agent")
     st.markdown("Ask questions about your feedback data. The agent can filter data and then run analysis on the subset.")
 
-    api_key = os.getenv("OPENAI_API_KEY")
+    # Get API key from Streamlit secrets
+    api_key = st.secrets.get("OPENAI_API_KEY")
     if not api_key:
-        st.error("❌ OpenAI API key not found! Please set it in your .env file.")
+        st.error("❌ OpenAI API key not found! Please set it in your .streamlit/secrets.toml file.")
         st.stop()
 
     # Load initial data
@@ -518,4 +576,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if check_password():
+        main()
