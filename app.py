@@ -11,6 +11,7 @@ from langchain_core.messages import AnyMessage, HumanMessage, AIMessage, SystemM
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.types import Command
+from streamlit_cookies_manager import EncryptedCookieManager
 
 # Load environment variables
 load_dotenv()
@@ -516,14 +517,50 @@ def build_graph(api_key):
 # ============================================================================
 
 def main():
+    # Initialize cookie manager
+    cookies = EncryptedCookieManager(password="feedback-agent-secure")
+    if not cookies.ready():
+        st.stop()
+
     st.title("📊 Feedback Analysis Agent")
     st.markdown("Ask questions about your feedback data. The agent can filter data and then run analysis on the subset.")
 
-    # Get API key from Streamlit secrets
-    api_key = st.secrets.get("OPENAI_API_KEY")
-    if not api_key:
-        st.error("❌ OpenAI API key not found! Please set it in your .streamlit/secrets.toml file.")
-        st.stop()
+    # API Key input with cookie persistence
+    st.markdown("🔑 **OpenAI API Key**")
+    col1, col2, col3 = st.columns([0.70, 0.15, 0.15], gap="small")
+    with col1:
+        api_key_input = st.text_input(
+            label="API Key",
+            value=cookies.get("openai_api_key", ""),
+            type="password",
+            help="Enter your OpenAI API key. It will be saved in your browser for future sessions.",
+            placeholder="sk-...",
+            label_visibility="collapsed"
+        )
+    with col2:
+        if st.button("Test", help="Test if the API key is valid", key="test_key_btn", use_container_width=True):
+            test_key = api_key_input.strip() if api_key_input else cookies.get("openai_api_key", "")
+            if not test_key:
+                st.error("Please enter an API key first.")
+            else:
+                try:
+                    os.environ["OPENAI_API_KEY"] = test_key
+                    llm = init_chat_model("openai:gpt-4o", temperature=0)
+                    llm.invoke([HumanMessage(content="test")])
+                    st.success("✅ API key is valid!")
+                except Exception as e:
+                    st.error(f"❌ Invalid API key: {str(e)}")
+    with col3:
+        if st.button("Reset", help="Remove the saved API key", key="reset_key_btn", use_container_width=True):
+            cookies["openai_api_key"] = ""
+            cookies.save()
+            st.rerun()
+
+    # Save API key to cookies if provided
+    api_key = api_key_input.strip() if api_key_input else cookies.get("openai_api_key", "")
+    if api_key_input and api_key_input != cookies.get("openai_api_key", ""):
+        cookies["openai_api_key"] = api_key_input.strip()
+        cookies.save()
 
     # Load initial data
     initial_df = load_data()
@@ -533,6 +570,14 @@ def main():
     with st.expander("📋 Dataset Overview", expanded=True):
         st.write(f"**Total Records:** {len(initial_df)}")
         st.dataframe(initial_df.head())
+
+    # Validate API key
+    if not api_key:
+        st.warning("⚠️ Please enter your OpenAI API key to continue.")
+        st.stop()
+
+    # Set API key in environment
+    os.environ["OPENAI_API_KEY"] = api_key
 
     if 'graph' not in st.session_state:
         st.session_state.graph = build_graph(api_key)
