@@ -122,11 +122,11 @@ class QueryClassification(BaseModel):
     """Structured output for query classification"""
     quantitve_analysis: Optional[str] = Field(
         None,
-        description="The quantitative/filtering part of the analysis query (e.g., 'filter Level < 3', 'count by ServiceName')"
+        description="The quantitative/filtering part of the analysis query (e.g., 'filter by criteria', 'count by category')"
     )
     semantic_analysis: Optional[str] = Field(
         None,
-        description="The semantic/qualitative part of the analysis query (e.g., 'main topics', 'sentiment themes')"
+        description="The semantic/qualitative part of the analysis query (e.g., 'find main topics', 'analyze sentiment')"
     )
 
 
@@ -151,16 +151,7 @@ def pandas_analysis(df: pd.DataFrame, user_query: str) -> dict:
     )
 
     try:
-        query = f"""IMPORTANT INSTRUCTIONS:
-- When filtering, counting, or analyzing data, you MUST return the COMPLETE result set.
-- NEVER use .head() to limit the results unless explicitly requested by the user.
-- NEVER truncate or sample the data unless specifically asked to do so.
-- Always show the full filtered dataset or complete analysis results.
-- Generate classifications in original QUERY language.
-
-QUERY: {user_query}
-"""   
-        result = pandas_agent_executor.invoke({"input": query})
+        result = pandas_agent_executor.invoke({"input": user_query})
 
         # Try to extract the DataFrame from intermediate steps
         extracted_df = df
@@ -186,36 +177,33 @@ QUERY: {user_query}
 
 def semantic_analysis(df: pd.DataFrame, query: str) -> str:
     """
-    Analyzes the 'Text' column of the DataFrame to find semantic topics.
-    Filters to first 300 rows for efficiency.
+    Analyzes the data in the DataFrame to find semantic topics, patterns, and insights.
+    Uses the first 300 rows for efficiency and provides full row context to the LLM.
     """
-    if 'Text' not in df.columns:
-        return "Error: 'Text' column not found in DataFrame."
-    
     if len(df) == 0:
         return "The DataFrame is empty. Nothing to analyze."
-    
-    SAMPLE_SIZE = 300
-    sample_df = df.head(SAMPLE_SIZE)  # Use first 300 rows instead of random sample
-    sample_texts = sample_df['Text'].dropna().tolist()
-    
-    if not sample_texts:
-        return "No feedback text found in the data to analyze."
-    
+
+    SAMPLE_SIZE = 100
+    sample_df = df.head(SAMPLE_SIZE)  # Use first 300 rows for efficiency
+
+    # Convert the entire DataFrame to a string representation for LLM context
+    # Using to_string() provides a readable format with all columns visible
+    df_string = sample_df.to_string()
+
     prompt_template = f"""
     QUERY: "{query}"
-    FEEDBACK CONTEXT:
+    DATA CONTEXT:
     ---
-    {sample_texts}
+    {df_string}
     ---
     """
-    
+
     try:
         llm = init_chat_model("openai:gpt-4o", temperature=0)
         response = llm.invoke([HumanMessage(content=prompt_template)])
         return response.content
     except Exception as e:
-        return f"Error during topic analysis: {str(e)}"
+        return f"Error during analysis: {str(e)}"
 
 
 def classify_node(state: AgentState) -> AgentState:
@@ -238,29 +226,10 @@ def classify_node(state: AgentState) -> AgentState:
 
     system_prompt = """
     You are a query classifier for a feedback analysis system.
-    The feedback dataset has the following columns:
-    - ID: Unique identifier
-    - ServiceName: Name of the service
-    - Level: Feedback level/rating (numeric)
-    - Text: Feedback text content
-    - ReferenceNumber: Reference number for tracking
 
     Your task is to analyze the conversation history and classify the user's intent into two parts:
-    1. quantitve_analysis: For quantitative operations like filtering, counting, grouping, statistical analysis
-    2. semantic_analysis: For qualitative analysis of the Text field like finding topics, themes, sentiment
-
-    Examples:
-    - "What are the 5 main topics of feedbacks with level < 3?"
-      quantitve_analysis: "filter where Level < 3"
-      semantic_analysis: "find 5 main topics"
-
-    - "How many feedbacks per ServiceName?"
-      quantitve_analysis: "count feedbacks grouped by ServiceName"
-      semantic_analysis: None
-
-    - "What are people complaining about?"
-      quantitve_analysis: None
-      semantic_analysis: "identify complaint topics"
+    1. quantitve_analysis: For quantitative operations like filtering, counting, grouping, aggregation, or statistical analysis on the dataset
+    2. semantic_analysis: For qualitative analysis such as finding topics, themes, patterns, sentiment, or insights from the data content
 
     If a part doesn't apply, return None for that field.
 
