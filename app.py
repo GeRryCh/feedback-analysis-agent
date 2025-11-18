@@ -128,6 +128,10 @@ class QueryClassification(BaseModel):
         None,
         description="The semantic/qualitative part of the analysis query (e.g., 'find main topics', 'analyze sentiment')"
     )
+    context_fields: Optional[list[str]] = Field(
+        None,
+        description="List of DataFrame column names relevant to the semantic analysis query (e.g., ['Text', 'Level', 'ServiceName'])"
+    )
 
 
 # ============================================================================
@@ -175,19 +179,31 @@ def pandas_analysis(df: pd.DataFrame, user_query: str) -> dict:
         }
 
 
-def semantic_analysis(df: pd.DataFrame, query: str) -> str:
+def semantic_analysis(df: pd.DataFrame, query: str, context_fields: Optional[list[str]] = None) -> str:
     """
     Analyzes the data in the DataFrame to find semantic topics, patterns, and insights.
-    Uses the first 300 rows for efficiency and provides full row context to the LLM.
+    Uses the first 100 rows for efficiency and provides focused row context to the LLM.
+
+    Args:
+        df: The DataFrame to analyze
+        query: The semantic analysis query
+        context_fields: Optional list of column names to include in context. If None, uses all columns.
     """
     if len(df) == 0:
         return "The DataFrame is empty. Nothing to analyze."
 
     SAMPLE_SIZE = 100
-    sample_df = df.head(SAMPLE_SIZE)  # Use first 300 rows for efficiency
+    sample_df = df.head(SAMPLE_SIZE)  # Use first 100 rows for efficiency
 
-    # Convert the entire DataFrame to a string representation for LLM context
-    # Using to_string() provides a readable format with all columns visible
+    # Filter to relevant fields if context_fields is provided
+    if context_fields:
+        # Only include fields that exist in the DataFrame
+        valid_fields = [f for f in context_fields if f in sample_df.columns]
+        if valid_fields:
+            sample_df = sample_df[valid_fields]
+
+    # Convert the DataFrame to a string representation for LLM context
+    # Using to_string() provides a readable format with selected columns visible
     df_string = sample_df.to_string()
 
     prompt_template = f"""
@@ -212,11 +228,12 @@ def classify_node(state: AgentState) -> AgentState:
     Uses the full conversation history to classify into:
     - quantitive_analysis: For filtering, counting, grouping, statistical analysis
     - semantic_analysis: For topics, themes, sentiment analysis
+    - context_fields: List of relevant column names for semantic analysis
     """
     # Check if there are any messages
     if not state["messages"]:
         return {
-            "classification": {"quantitve_analysis": None, "semantic_analysis": None}
+            "classification": {"quantitve_analysis": None, "semantic_analysis": None, "context_fields": None}
         }
 
     llm = init_chat_model("openai:gpt-4o", temperature=0)
@@ -224,12 +241,22 @@ def classify_node(state: AgentState) -> AgentState:
     # Create a structured LLM with the QueryClassification model
     structured_llm = llm.with_structured_output(QueryClassification)
 
-    system_prompt = """
+    # Load data and generate preview to show available fields
+    df = load_data()
+    df_preview = df.head(5).to_string() if df is not None else "No data available"
+
+    system_prompt = f"""
     You are a query classifier for a feedback analysis system.
 
-    Your task is to analyze the conversation history and classify the user's intent into two parts:
+    AVAILABLE DATA STRUCTURE:
+    ---
+    {df_preview}
+    ---
+
+    Your task is to analyze the conversation history and classify the user's intent into three parts:
     1. quantitve_analysis: For quantitative operations like filtering, counting, grouping, aggregation, or statistical analysis on the dataset
     2. semantic_analysis: For qualitative analysis such as finding topics, themes, patterns, sentiment, or insights from the data content
+    3. context_fields: List of column names from the data that are relevant for analyzing the semantic_analysis query. Only include columns that would help answer the semantic query. Ignore ID, ReferenceNumber, RequestID, ProcessID unless directly relevant.
 
     If a part doesn't apply, return None for that field.
 
@@ -248,13 +275,14 @@ def classify_node(state: AgentState) -> AgentState:
         return {
             "classification": {
                 "quantitve_analysis": result.quantitve_analysis,
-                "semantic_analysis": result.semantic_analysis
+                "semantic_analysis": result.semantic_analysis,
+                "context_fields": result.context_fields
             }
         }
-    except Exception as e:
-        # Return None for both on error
+    except Exception:
+        # Return None for all on error
         return {
-            "classification": {"quantitve_analysis": None, "semantic_analysis": None}
+            "classification": {"quantitve_analysis": None, "semantic_analysis": None, "context_fields": None}
         }
 
 
@@ -348,6 +376,7 @@ def semantic_analysis_node(state: AgentState) -> AgentState:
     """Node that performs semantic topic analysis on feedback text."""
     classification = state.get("classification", {})
     semantic_query = classification.get("semantic_analysis") if classification else None
+    context_fields = classification.get("context_fields") if classification else None
 
     if not semantic_query:
         # No semantic analysis needed
@@ -361,8 +390,8 @@ def semantic_analysis_node(state: AgentState) -> AgentState:
     if data_frame is None:
         return {"semantic_analysis_result": "Error: Could not load data."}
 
-    # Perform semantic analysis
-    result = semantic_analysis(data_frame, semantic_query)
+    # Perform semantic analysis with selected context fields
+    result = semantic_analysis(data_frame, semantic_query, context_fields=context_fields)
 
     return {
         "semantic_analysis_result": result
@@ -429,7 +458,7 @@ def route_after_quantitive_analysys(state: AgentState) -> str:
 # LANGGRAPH SETUP
 # ============================================================================
 
-def build_graph(api_key):
+def build_graph():
     """Create and compile the Command-based orchestrator LangGraph StateGraph.
 
     The graph starts with an orchestrator node that uses Command objects to decide
@@ -549,7 +578,7 @@ def main():
     os.environ["OPENAI_API_KEY"] = api_key
 
     if 'graph' not in st.session_state:
-        st.session_state.graph = build_graph(api_key)
+        st.session_state.graph = build_graph()
     if 'messages' not in st.session_state:
         st.session_state.messages = []
 
